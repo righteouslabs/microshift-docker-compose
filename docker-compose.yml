@@ -5,6 +5,9 @@ services:
     hostname: microshift
     privileged: true
     tty: true
+    cpus: 2
+    mem_limit: 4g
+    memswap_limit: 4g
     ulimits:
       nofile:
         soft: 524288
@@ -49,13 +52,20 @@ services:
           > /output/kubeconfig
         echo "kubeconfig written to ./kubeconfig"
 
-  console-setup:
+  cluster-setup:
     image: bitnami/kubectl:latest
-    container_name: microshift-console-setup
+    container_name: microshift-cluster-setup
     user: "0:0"
     depends_on:
       microshift:
         condition: service_healthy
+    environment:
+      # Bump these versions to upgrade operators
+      - LOCAL_PATH_PROVISIONER_VERSION=v0.0.30
+      - PROMETHEUS_OPERATOR_VERSION=v0.82.2
+      - CERT_MANAGER_VERSION=v1.19.4
+      - RABBITMQ_CLUSTER_OPERATOR_VERSION=v2.19.1
+      - RABBITMQ_TOPOLOGY_OPERATOR_VERSION=v1.18.3
     volumes:
       - microshift-data:/var/lib/microshift:ro
       - ./manifests:/manifests:ro
@@ -65,18 +75,57 @@ services:
       - -c
       - |
         export KUBECONFIG=/var/lib/microshift/resources/kubeadmin/microshift/kubeconfig
-        echo "Applying console RBAC manifests..."
+
+        echo "=== Cleaning up TopoLVM (not supported in containers) ==="
+        kubectl delete namespace topolvm-system --ignore-not-found --timeout=60s || true
+        kubectl delete storageclass topolvm-provisioner --ignore-not-found || true
+        kubectl delete csidriver topolvm.io --ignore-not-found || true
+
+        echo "=== Installing Local Path Provisioner $${LOCAL_PATH_PROVISIONER_VERSION} ==="
+        curl -sL "https://raw.githubusercontent.com/rancher/local-path-provisioner/$${LOCAL_PATH_PROVISIONER_VERSION}/deploy/local-path-storage.yaml" \
+          | sed 's|image: rancher/|image: docker.io/rancher/|g' \
+          | kubectl apply -f -
+        echo "Setting local-path as default StorageClass..."
+        kubectl patch storageclass local-path -p '{"metadata":{"annotations":{"storageclass.kubernetes.io/is-default-class":"true"}}}'
+
+        echo "=== Installing Prometheus Operator CRDs $${PROMETHEUS_OPERATOR_VERSION} ==="
+        curl -sL "https://github.com/prometheus-operator/prometheus-operator/releases/download/$${PROMETHEUS_OPERATOR_VERSION}/stripped-down-crds.yaml" \
+          | kubectl apply --server-side -f -
+
+        echo "=== Installing cert-manager $${CERT_MANAGER_VERSION} ==="
+        curl -sL "https://github.com/cert-manager/cert-manager/releases/download/$${CERT_MANAGER_VERSION}/cert-manager.yaml" \
+          | kubectl apply -f -
+        echo "Waiting for cert-manager webhook to be ready..."
+        kubectl wait --for=condition=Available deployment/cert-manager-webhook -n cert-manager --timeout=300s
+
+        echo "=== Installing RabbitMQ Cluster Operator $${RABBITMQ_CLUSTER_OPERATOR_VERSION} ==="
+        curl -sL "https://github.com/rabbitmq/cluster-operator/releases/download/$${RABBITMQ_CLUSTER_OPERATOR_VERSION}/cluster-operator.yml" \
+          | sed 's|image: rabbitmqoperator/|image: docker.io/rabbitmqoperator/|g' \
+          | kubectl apply -f -
+        echo "Waiting for RabbitMQ Cluster Operator to be ready..."
+        kubectl wait --for=condition=Available deployment/rabbitmq-cluster-operator -n rabbitmq-system --timeout=300s
+
+        echo "=== Installing RabbitMQ Messaging Topology Operator $${RABBITMQ_TOPOLOGY_OPERATOR_VERSION} ==="
+        curl -sL "https://github.com/rabbitmq/messaging-topology-operator/releases/download/$${RABBITMQ_TOPOLOGY_OPERATOR_VERSION}/messaging-topology-operator-with-certmanager.yaml" \
+          | sed 's|image: rabbitmqoperator/|image: docker.io/rabbitmqoperator/|g' \
+          | kubectl apply -f -
+        echo "Waiting for RabbitMQ Messaging Topology Operator to be ready..."
+        kubectl wait --for=condition=Available deployment/messaging-topology-operator -n rabbitmq-system --timeout=300s
+
+        echo "=== Setting up OpenShift Console ==="
         kubectl apply -f /manifests/openshift-console.yaml
         echo "Creating console bearer token..."
         kubectl create token openshift-console -n openshift-console --duration=8760h > /console/token
         echo "Console bearer token written"
+
+        echo "=== Cluster setup complete ==="
 
   openshift-console:
     image: quay.io/openshift/origin-console:4.17
     platform: linux/amd64
     container_name: openshift-console
     depends_on:
-      console-setup:
+      cluster-setup:
         condition: service_completed_successfully
     network_mode: "service:microshift"
     volumes:
