@@ -1,0 +1,98 @@
+services:
+  microshift:
+    image: ghcr.io/microshift-io/microshift:4.21.0_g29f429c21_4.21.0_okd_scos.ec.15
+    container_name: microshift
+    hostname: microshift
+    privileged: true
+    tty: true
+    ulimits:
+      nofile:
+        soft: 524288
+        hard: 524288
+    ports:
+      - "6443:6443"
+      - "9000:9000"
+    volumes:
+      - /dev:/dev
+      - microshift-data:/var/lib/microshift
+      - ./config/api_server.yaml:/etc/microshift/config.d/api_server.yaml:ro
+    tmpfs:
+      - /var/lib/containers
+      - /tmp
+      - /run
+    dns_search:
+      - "."
+    healthcheck:
+      test: ["CMD", "test", "-f", "/var/lib/microshift/resources/kubeadmin/microshift/kubeconfig"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+      start_period: 120s
+
+  kubeconfig:
+    image: alpine:latest
+    container_name: microshift-kubeconfig
+    depends_on:
+      microshift:
+        condition: service_healthy
+    volumes:
+      - microshift-data:/var/lib/microshift:ro
+      - ./:/output
+    entrypoint: /bin/sh
+    command:
+      - -c
+      - |
+        sed 's|server: https://microshift:6443|server: https://localhost:6443|' \
+          /var/lib/microshift/resources/kubeadmin/microshift/kubeconfig \
+          | sed '/certificate-authority-data:/d' \
+          | sed 's|server: https://localhost:6443|insecure-skip-tls-verify: true\n    server: https://localhost:6443|' \
+          > /output/kubeconfig
+        echo "kubeconfig written to ./kubeconfig"
+
+  console-setup:
+    image: bitnami/kubectl:latest
+    container_name: microshift-console-setup
+    user: "0:0"
+    depends_on:
+      microshift:
+        condition: service_healthy
+    volumes:
+      - microshift-data:/var/lib/microshift:ro
+      - ./manifests:/manifests:ro
+      - console-data:/console
+    entrypoint: /bin/sh
+    command:
+      - -c
+      - |
+        export KUBECONFIG=/var/lib/microshift/resources/kubeadmin/microshift/kubeconfig
+        echo "Applying console RBAC manifests..."
+        kubectl apply -f /manifests/openshift-console.yaml
+        echo "Creating console bearer token..."
+        kubectl create token openshift-console -n openshift-console --duration=8760h > /console/token
+        echo "Console bearer token written"
+
+  openshift-console:
+    image: quay.io/openshift/origin-console:4.17
+    platform: linux/amd64
+    container_name: openshift-console
+    depends_on:
+      console-setup:
+        condition: service_completed_successfully
+    network_mode: "service:microshift"
+    volumes:
+      - console-data:/console:ro
+    entrypoint: /bin/sh
+    command:
+      - -c
+      - |
+        export BRIDGE_USER_AUTH=disabled
+        export BRIDGE_K8S_MODE=off-cluster
+        export BRIDGE_K8S_MODE_OFF_CLUSTER_ENDPOINT=https://localhost:6443
+        export BRIDGE_K8S_MODE_OFF_CLUSTER_SKIP_VERIFY_TLS=true
+        export BRIDGE_K8S_AUTH=bearer-token
+        export BRIDGE_K8S_AUTH_BEARER_TOKEN=$(cat /console/token)
+        exec /opt/bridge/bin/bridge --public-dir=/opt/bridge/static --listen=http://0.0.0.0:9000
+
+volumes:
+  microshift-data:
+  console-data:
