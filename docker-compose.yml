@@ -1,6 +1,7 @@
 services:
+
   microshift:
-    image: ghcr.io/microshift-io/microshift:4.21.0_g29f429c21_4.21.0_okd_scos.ec.15
+    image: &microshift-image ghcr.io/microshift-io/microshift:4.21.0_g29f429c21_4.21.0_okd_scos.ec.15
     container_name: microshift
     hostname: microshift
     privileged: true
@@ -12,6 +13,9 @@ services:
       nofile:
         soft: 524288
         hard: 524288
+    depends_on:
+      lvm-setup:
+        condition: service_completed_successfully
     ports:
       - "6443:6443"
       - "9000:9000"
@@ -31,6 +35,40 @@ services:
       timeout: 5s
       retries: 30
       start_period: 120s
+
+  lvm-setup:
+    # Matches upstream cluster_manager.sh: create loopback LVM before MicroShift starts.
+    # TopoLVM auto-discovers the "myvg1" volume group for PVC provisioning.
+    image: *microshift-image
+    container_name: microshift-lvm-setup
+    privileged: true
+    volumes:
+      - /dev:/dev
+      - microshift-data:/var/lib/microshift
+    entrypoint: /bin/bash
+    command:
+      - -c
+      - |
+        VG_NAME="myvg1"
+        BACKING_FILE="/var/lib/microshift/lvm-backing.img"
+
+        if vgs "$$VG_NAME" &>/dev/null; then
+            echo "Volume group $$VG_NAME already exists, skipping setup"
+            exit 0
+        fi
+
+        echo "Creating sparse backing file at $$BACKING_FILE..."
+        truncate -s 1G "$$BACKING_FILE"
+
+        echo "Setting up loopback device..."
+        LOOP=$$(losetup --find --show "$$BACKING_FILE")
+        echo "Loop device: $$LOOP"
+
+        echo "Creating volume group $$VG_NAME..."
+        vgcreate -f -y "$$VG_NAME" "$$LOOP"
+
+        echo "LVM setup complete:"
+        vgs "$$VG_NAME"
 
   kubeconfig:
     image: alpine:latest
@@ -61,7 +99,6 @@ services:
         condition: service_healthy
     environment:
       # Bump these versions to upgrade operators
-      - LOCAL_PATH_PROVISIONER_VERSION=v0.0.30
       - PROMETHEUS_OPERATOR_VERSION=v0.82.2
       - CERT_MANAGER_VERSION=v1.19.4
       - RABBITMQ_CLUSTER_OPERATOR_VERSION=v2.19.1
@@ -75,18 +112,6 @@ services:
       - -c
       - |
         export KUBECONFIG=/var/lib/microshift/resources/kubeadmin/microshift/kubeconfig
-
-        echo "=== Cleaning up TopoLVM (not supported in containers) ==="
-        kubectl delete namespace topolvm-system --ignore-not-found --timeout=60s || true
-        kubectl delete storageclass topolvm-provisioner --ignore-not-found || true
-        kubectl delete csidriver topolvm.io --ignore-not-found || true
-
-        echo "=== Installing Local Path Provisioner $${LOCAL_PATH_PROVISIONER_VERSION} ==="
-        curl -sL "https://raw.githubusercontent.com/rancher/local-path-provisioner/$${LOCAL_PATH_PROVISIONER_VERSION}/deploy/local-path-storage.yaml" \
-          | sed 's|image: rancher/|image: docker.io/rancher/|g' \
-          | kubectl apply -f -
-        echo "Setting local-path as default StorageClass..."
-        kubectl patch storageclass local-path -p '{"metadata":{"annotations":{"storageclass.kubernetes.io/is-default-class":"true"}}}'
 
         echo "=== Installing Prometheus Operator CRDs $${PROMETHEUS_OPERATOR_VERSION} ==="
         curl -sL "https://github.com/prometheus-operator/prometheus-operator/releases/download/$${PROMETHEUS_OPERATOR_VERSION}/stripped-down-crds.yaml" \

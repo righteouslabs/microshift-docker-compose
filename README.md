@@ -35,7 +35,7 @@ On startup, the `cluster-setup` container automatically installs:
 
 | Component | Purpose |
 |---|---|
-| **Local Path Provisioner** | Default StorageClass for PVC dynamic provisioning (replaces TopoLVM) |
+| **TopoLVM CSI** | Default StorageClass for PVC dynamic provisioning (backed by loopback LVM) |
 | **Prometheus Operator CRDs** | `PrometheusRule`, `ServiceMonitor`, `PodMonitor`, etc. (CRDs only, no full stack) |
 | **cert-manager** | TLS certificate management (prerequisite for topology operator) |
 | **RabbitMQ Cluster Operator** | Manages `RabbitmqCluster` custom resources |
@@ -142,16 +142,17 @@ kubectl logs -f deployment/rabbitmq-cluster-operator -n rabbitmq-system
 
 ## Architecture
 
-The stack runs four containers:
+The stack runs five containers:
 
 | Container | Purpose |
 |---|---|
+| `microshift-lvm-setup` | One-shot: creates a loopback LVM volume group for TopoLVM (matches upstream `cluster_manager.sh`) |
 | `microshift` | The MicroShift cluster (systemd, CRI-O, kubelet, API server) |
 | `microshift-kubeconfig` | One-shot: extracts and patches kubeconfig for localhost access |
-| `microshift-cluster-setup` | One-shot: removes TopoLVM, installs local-path provisioner, cert-manager, RabbitMQ operators, and console RBAC |
+| `microshift-cluster-setup` | One-shot: installs Prometheus CRDs, cert-manager, RabbitMQ operators, and console RBAC |
 | `openshift-console` | The OpenShift web console UI (port 9000) |
 
-The `kubeconfig` and `cluster-setup` containers exit after completing their setup tasks. The `microshift` and `openshift-console` containers stay running.
+The `lvm-setup`, `kubeconfig`, and `cluster-setup` containers exit after completing their tasks. The `microshift` and `openshift-console` containers stay running.
 
 ## Ports
 
@@ -191,7 +192,6 @@ Operator manifests (cert-manager, RabbitMQ Cluster Operator, RabbitMQ Messaging 
 
 ```yaml
 environment:
-  - LOCAL_PATH_PROVISIONER_VERSION=v0.0.30
   - PROMETHEUS_OPERATOR_VERSION=v0.82.2
   - CERT_MANAGER_VERSION=v1.19.4
   - RABBITMQ_CLUSTER_OPERATOR_VERSION=v2.19.1
@@ -223,8 +223,8 @@ Make sure you're using the auto-generated kubeconfig (not a stale copy). The gen
 **Operator pods stuck in `ImagePullBackOff`:**
 CRI-O inside MicroShift enforces fully-qualified image names. If updating operator manifests, ensure all `image:` references include the registry prefix (e.g., `docker.io/rabbitmqoperator/...` not just `rabbitmqoperator/...`).
 
-**TopoLVM pods reappear after restart:**
-The OKD community build deploys TopoLVM via hardcoded static manifests regardless of config. The `cluster-setup` service deletes the `topolvm-system` namespace on each startup. If you see TopoLVM pods briefly before cluster-setup runs, they will be cleaned up automatically.
+**TopoLVM pods in CrashLoopBackOff:**
+TopoLVM requires an LVM volume group. The `lvm-setup` init container creates a 1GB sparse-file-backed loopback VG (`myvg1`) before MicroShift starts, matching the upstream `cluster_manager.sh` approach. If the VG is missing (e.g., after a Docker Desktop restart that clears loopback devices), do a full reset: `docker compose down -v && docker compose up -d`.
 
 **Image pull failures inside MicroShift:**
 CRI-O inside MicroShift runs on the host's native architecture. On Apple Silicon, only arm64 images can be pulled by pods. The OpenShift console runs as a Docker Compose sidecar (with Rosetta amd64 emulation) to work around this.
