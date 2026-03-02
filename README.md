@@ -10,10 +10,13 @@ Run a single-node [MicroShift](https://github.com/microshift-io/microshift) (OKD
 ## Quick Start
 
 ```bash
-cd microshift
+git clone https://github.com/righteouslabs/microshift-docker-compose
+
+cd microshift-docker-compose
 
 # Start the cluster (first run pulls images and takes ~5 minutes)
-docker compose up -d
+docker compose up --detach
+# Alternative: podman compose up --detach
 
 # Point kubectl at the auto-generated kubeconfig
 export KUBECONFIG=$(pwd)/kubeconfig
