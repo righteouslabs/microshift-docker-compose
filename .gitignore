@@ -1,2 +1,5 @@
 # MicroShift Kubeconfig file
 kubeconfig
+
+# Docker compose overrides
+docker-compose.override.yml
