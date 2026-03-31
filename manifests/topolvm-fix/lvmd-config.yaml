@@ -1,0 +1,17 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: topolvm-lvmd-0
+  namespace: topolvm-system
+  labels:
+    idx: "0"
+    app.kubernetes.io/name: topolvm
+    app.kubernetes.io/instance: topolvm
+data:
+  lvmd.yaml: |
+    socket-name: /run/topolvm/lvmd.sock
+    device-classes:
+      - default: true
+        name: ssd
+        spare-gb: 0
+        volume-group: myvg1

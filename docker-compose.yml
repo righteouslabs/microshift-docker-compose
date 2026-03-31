@@ -23,6 +23,8 @@ services:
       - /dev:/dev
       - microshift-data:/var/lib/microshift
       - ./config/api_server.yaml:/etc/microshift/config.d/api_server.yaml:ro
+      - ./config/storage.yaml:/etc/microshift/config.d/01-disable-storage-csi.yaml:ro
+      - ./manifests/topolvm-fix:/etc/microshift/manifests.d/002-topolvm-fix:ro
     tmpfs:
       - /var/lib/containers
       - /tmp
